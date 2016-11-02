@@ -23,6 +23,9 @@ const int YSIZE = 2048;
 /* Max number of iterations */
 const int MAXITER = 255;
 
+const int BLOCKY = 8;
+const int BLOCKX = 8;
+
 /* Range in x direction */
 const float xleft = -2.0;
 const float xright = 1.0;
@@ -45,16 +48,36 @@ double walltime() {
 }
 
 /* Acutal GPU kenel which will be executed in parallel on the GPU */
-__global__ void mandel_kernel( /* Add arguments here */ ){
-      
+__global__ void mandel_kernel(int *a, double xleft, double yupper, double step /* Add arguments here */ ){
+    int i = blockIdx.x * 8 + threadIdx.x;
+    int j = blockIdx.y * 8 + threadIdx.y;
+    complex_t c,z,temp;
+    int iter=0;
+    c.real = (xleft + step*i);
+    c.imag = (yupper - step*j);
+    z = c;
+    while(z.real*z.real + z.imag*z.imag < 4.0){
+          temp.real = z.real*z.real - z.imag*z.imag + c.real;
+          temp.imag = 2.0*z.real*z.imag + c.imag;
+          z = temp;
+          if(++iter==MAXITER) break;
+    }
+    a[j * XSIZE + i] = iter;
 }
 
 /* Set up and call GPU kernel */
 void calculate_cuda(int* pixel){
     // Allocate memory
+       int *a;
+       cudaMalloc((void**)&a, XSIZE*YSIZE*sizeof(int));
     // Compute thread-block size
+       dim3 gridBlock(XSIZE/BLOCKX, YSIZE/BLOCKY);
+       dim3 threadBlock(BLOCKX, BLOCKY);
     // Call kernel
+       mandel_kernel<<<gridBlock,threadBlock>>>(a,xleft,yupper,step);
     // Transfer result from GPU to CPU
+       cudaMemcpy(pixel, a, XSIZE*YSIZE*sizeof(int),cudaMemcpyDeviceToHost );
+       cudaFree(a);
 }
     
 
