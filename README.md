@@ -1,0 +1,1 @@
+# Parallelle_beregninger_arbeid
