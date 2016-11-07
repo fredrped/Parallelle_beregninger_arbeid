@@ -85,19 +85,26 @@ float
 
 /* Allocate arrays on GPU */
 void device_allocation(){
+	
+	cudaMalloc((void**)&temperature_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float)); //Is this correct regarding temp, since it has dim=2
+	cudaMalloc((void**)&material_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float)); 
 }
 
 /* Transfer input to GPU */
 void transfer_to_gpu(){
+	cudaMemcpy(temperature_device[0], temperature, GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyHostToDevice);
+	cudaMemcpy(material_device, material, GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyHostToDevice);
 }
 
 /* Transfer output from GPU to CPU */
-void transfer_from_gpu(int step){
+void transfer_from_gpu(int step){//unsure of the index?
+	cudaMemcpy(temperature,temperature_device[1],GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyDeviceToHost);
+	cudaMemcpy(material,material_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyDeviceToHost);
 }
 
 /* Plain/global memory only kernel
-__global__ void  ftcs_kernel( /* Add arguments here */ ){
-}
+__global__ void  ftcs_kernel(  Add arguments here  ){
+} */
 
 /* Shared memory kernel */
 __global__ void  ftcs_kernel_shared( /* Add arguments here */ ){
@@ -144,6 +151,10 @@ float ftcs_solver_gpu_texture( int step, int block_size_x, int block_size_y ){
 
 /* Set up and call external_heat_kernel */
 void external_heat_gpu( int step, int block_size_x, int block_size_y ){
+	dim3 gridBlock(GRID_SIZE[0]/block_size_x, GRID_SIZE[1]/block_size_y);
+        dim3 threadBlock(block_size_x,block_size_y);
+        external_heat_kernel<<<gridBlock,threadBlock>>>();
+	//need to do more not sure what do do next??? 
 }
 
 void print_gpu_info(){
