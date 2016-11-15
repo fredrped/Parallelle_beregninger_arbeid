@@ -11,7 +11,7 @@ void external_heat_gpu ( int step, int block_size_x, int block_size_y );
 void transfer_from_gpu( int step );
 void transfer_to_gpu();
 void device_allocation();
-
+//int ti(int,int)
 /* Prototypes for functions found at the end of this file */
 void write_temp( int step );
 void print_local_temps();
@@ -57,8 +57,9 @@ const float
     dt = 2.5e-3;
 
 /* Size of the computational grid - 1024x1024 square */
-const int GRID_SIZE[2] = {2048, 2048};
-
+const int GRID_SIZE[2] = {1024, 1024};
+//__constant__ int GRID_SIZE_DEVICE[2] = {2048, 2048};
+__device__ int GRID_SIZE_DEVICE[2] = {1024, 1024};
 /* Parameters of the simulation: how many steps, and when to cut off the heat */
 const int NSTEPS = 10000;
 const int CUTOFF = 5000;
@@ -81,14 +82,37 @@ float
     *material_device,           // Material constants
     *temperature_device[2];      // Temperature field, 2 arrays 
 
+texture<float, cudaTextureType2D> temperature_device_ref;
+
+
+
+int iDivup(int a, int b){return ((a%b)!=0) ? (a/b + 1) : (a/b);  }  
+
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+
 
 
 /* Allocate arrays on GPU */
 void device_allocation(){
 	
-	cudaMalloc((void**)&temperature_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float)); //Is this correct regarding temp, since it has dim=2
+	cudaMalloc((void**)&temperature_device[0],GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float)); //Is this correct regarding temp, since it has dim=2
+
+	cudaMalloc((void**)&temperature_device[1],GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float)); //Is this correct regarding temp, since it has dim=2
 	cudaMalloc((void**)&material_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float)); 
 }
+
+//void cpuAlloc( void ** ptr, size_t size){
+//	*ptr=calloc(size, 1);
+//}
 
 /* Transfer input to GPU */
 void transfer_to_gpu(){
@@ -98,65 +122,258 @@ void transfer_to_gpu(){
 
 /* Transfer output from GPU to CPU */
 void transfer_from_gpu(int step){//unsure of the index?
-	cudaMemcpy(temperature,temperature_device[1],GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyDeviceToHost);
-	cudaMemcpy(material,material_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyDeviceToHost);
+	cudaMemcpy(temperature,temperature_device[step%2],GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyDeviceToHost);
+	//cudaMemcpy(material,material_device,GRID_SIZE[0]*GRID_SIZE[1]*sizeof(float),cudaMemcpyDeviceToHost);
 }
 
-/* Plain/global memory only kernel
-__global__ void  ftcs_kernel(  Add arguments here  ){
-} */
+
+
+__device__ int ti(int x, int y){
+
+    if(x < 0){
+        x++;
+    }
+    if(x >= GRID_SIZE_DEVICE[0]){
+        x--;
+    } 
+    if(y < 0){
+        y++;
+    }
+    if(y >= GRID_SIZE_DEVICE[1]){
+        y--;
+    }
+
+    return ((y)*(GRID_SIZE_DEVICE[0]) + x);
+}
+
+
+/* Plain/global memory only kernel*/
+__global__ void  ftcs_kernel( float* in, float* out, float* material_map ){
+	int x = blockIdx.x*blockDim.x + threadIdx.x;
+	int y = blockIdx.y*blockDim.y + threadIdx.y;
+	
+	//float* in = heat_map[step%2];
+	//float* out = heat_map[(step+1)%2];
+	if ((x<(GRID_SIZE_DEVICE[0])) &&( y<(GRID_SIZE_DEVICE[1]))){
+		out[ti(x,y)] = in[ti(x,y)] + material_map[ ti(x,y)]*
+				(in[ti(x+1,y)] +
+				in[ti(x-1,y)] +
+				in[ti(x,y+1)] +
+				in[ti(x,y-1)] -
+				4*in[ti(x,y)]);
+		}
+
+} 
+
+
+
+
 
 /* Shared memory kernel */
-__global__ void  ftcs_kernel_shared( /* Add arguments here */ ){
+__global__ void  ftcs_kernel_shared( float* in, float* out, float* material_map, int GLOBAL_GRID_SIZE_X ){
+	extern __shared__ float tile[];
+	//gives weird results if blockDim is odde
+
+	int global_x = blockIdx.x*blockDim.x + threadIdx.x;
+	int global_y = blockIdx.y*blockDim.y + threadIdx.y;
+
+	int local_x = threadIdx.x;
+	int local_y = threadIdx.y;
+
+	int local_pos = local_x + local_y*blockDim.x;
+
+	int local_pos_w = local_x-1 + local_y*blockDim.x;
+	int local_pos_e = local_x+1 + local_y*blockDim.x;
+	int local_pos_n = local_x + (local_y-1)*blockDim.x;
+	int local_pos_s = local_x + (local_y+1)*blockDim.x;
+	
+	float west,east,north,south;
+	//maping in array to shared array
+	if ((global_x<(GRID_SIZE_DEVICE[0])) &&( global_y<(GRID_SIZE_DEVICE[1]))){
+//	__syncthreads();
+		tile[local_pos] = in[global_x+global_y*GLOBAL_GRID_SIZE_X];
+
+		__syncthreads();
+
+		if(local_x==0){
+			west = in[ti(global_x-1,global_y)]; 
+		
+		}
+		else{
+			west = tile[local_pos_w];
+		}
+		if((local_x==(blockDim.x-1))||(global_x==GRID_SIZE_DEVICE[0]-1)){
+			east = in[ti(global_x+1,global_y)];
+		 
+		}
+		else{
+			east = tile[local_pos_e];
+		}
+		if(local_y==0){
+			north = in[ti(global_x,global_y-1)];
+		
+		}
+		else{
+			north = tile[local_pos_n];
+		}
+		if(local_y==(blockDim.y-1)||(global_y==GRID_SIZE_DEVICE[1]-1)){
+			south = in[ti(global_x,global_y+1)];
+		
+		}
+		else{
+			south = tile[local_pos_s];
+		}
+	
+
+		out[ti(global_x,global_y)] = tile[local_pos] + material_map[ti(global_x,global_y)]*
+				(west +
+				east +
+				north +
+				south -
+				4*tile[local_pos]);
+
+	}
 }
+
+
+
 
 /* Texture memory kernel */
-__global__ void  ftcs_kernel_texture( /* Add arguments here */ ){
-}
+__global__ void  ftcs_kernel_texture(float* out, float* material_map /* Add arguments here */ ){
+	int x = blockIdx.x*blockDim.x + threadIdx.x;
+	int y = blockIdx.y*blockDim.y + threadIdx.y; 
+	if ((x<(GRID_SIZE_DEVICE[0])) &&( y<(GRID_SIZE_DEVICE[1]))){
 
+	out[ti(x,y)] = tex2D(temperature_device_ref, x, y) + material_map[ ti(x,y)]*
+                                (tex2D(temperature_device_ref, x+1, y) +
+                                 tex2D(temperature_device_ref, x-1, y) +
+                                 tex2D(temperature_device_ref, x, y+1) +
+                                 tex2D(temperature_device_ref, x, y-1) -
+                               4*tex2D(temperature_device_ref, x, y));
+
+	}
+}
 
 /* External heat kernel, should do the same work as the external
  * heat function in the serial code 
  */
-__global__ void external_heat_kernel( /* Add arguments here */ ){
+__global__ void external_heat_kernel( float* heat_map, int x_0, int y_0, int GRID_SIZE_X){
+	
+	int x = blockIdx.x*blockDim.x + threadIdx.x + x_0;
+	int y = blockIdx.y*blockDim.y + threadIdx.y + y_0;//ask questions here how does this work
+	if ((x<(GRID_SIZE_DEVICE[0])) &&( y<(GRID_SIZE_DEVICE[1]))){
+		heat_map[y*GRID_SIZE_X+x]=100;	
+	}
 }
-
 /* Set up and call ftcs_kernel
  * should return the execution time of the kernel
  */
 float ftcs_solver_gpu( int step, int block_size_x, int block_size_y ){
-    
-    float time = -1.0;
+	int num_block_x_direc = iDivup(GRID_SIZE[0],block_size_x);
+	int num_block_y_direc = iDivup(GRID_SIZE[1],block_size_y);
+	
+	dim3 gridBlock(num_block_x_direc, num_block_y_direc);
+        dim3 threadBlock(block_size_x,block_size_y);
+
+	float time = 0;	
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+
+
+	gpuErrchk(cudaPeekAtLastError());
+	
+	cudaEventRecord(start);	
+	ftcs_kernel<<<gridBlock,threadBlock>>>( temperature_device[step%2], temperature_device[(step+1)%2], material_device);
+    	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&time,start,stop);
     return time;
 }
+
+
+
 
 /* Set up and call ftcs_kernel_shared
  * should return the execution time of the kernel
  */
 float ftcs_solver_gpu_shared( int step, int block_size_x, int block_size_y ){
-    
-    float time = -1.0;
+	//THE QUESTION IS WHERE TO ALLOCATE THE SHARED MEMORY
+	int num_block_x_direc = iDivup(GRID_SIZE[0],block_size_x);
+        int num_block_y_direc = iDivup(GRID_SIZE[1],block_size_y);
+
+	size_t tile_size = block_size_x*block_size_y*sizeof(float);
+        dim3 gridBlock(num_block_x_direc, num_block_y_direc);
+    	dim3 threadBlock(block_size_x,block_size_y);
+	
+	//remember this do not include the halo. should i allocate share mem here instead?
+	float time = 0;	
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	cudaEventRecord(start);
+
+	ftcs_kernel_shared<<<gridBlock,threadBlock, tile_size>>>(temperature_device[step%2], temperature_device[(step+1)%2], material_device, GRID_SIZE[0] );
+
+	cudaEventRecord(stop);
+
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&time,start,stop);    	
     return time;
 }
+
+
+
 
 /* Set up and call ftcs_kernel_texture
  * should return the execution time of the kernel
  */
 float ftcs_solver_gpu_texture( int step, int block_size_x, int block_size_y ){
-    
-    float time = -1.0;
-    return time;
+	
+	int num_block_x_direc = iDivup(GRID_SIZE[0],block_size_x);
+        int num_block_y_direc = iDivup(GRID_SIZE[1],block_size_y);
+
+    	
+	dim3 gridBlock(num_block_x_direc, num_block_y_direc);
+        dim3 threadBlock(block_size_x,block_size_y);
+        gpuErrchk(cudaPeekAtLastError());
+
+	float time = 0;
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+	//binding texture array to input array
+	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float>();//these two are wrong
+	cudaBindTexture2D(NULL, temperature_device_ref, temperature_device[step%2], channelDesc, GRID_SIZE[0],GRID_SIZE[1],GRID_SIZE[0]*sizeof(float));
+ 	
+	cudaEventRecord(start);   	
+	
+	ftcs_kernel_texture<<<gridBlock,threadBlock>>>( temperature_device[(step+1)%2], material_device);//thought i had to send to kernel?
+	
+	cudaEventRecord(stop);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&time,start,stop);
+	
+    	return time;
 }
 
 
-/* Set up and call external_heat_kernel */
-void external_heat_gpu( int step, int block_size_x, int block_size_y ){
-	dim3 gridBlock(GRID_SIZE[0]/block_size_x, GRID_SIZE[1]/block_size_y);
-        dim3 threadBlock(block_size_x,block_size_y);
-        external_heat_kernel<<<gridBlock,threadBlock>>>();
+/* Set up and call external_heat_kernel improvement is to have threadwarp fully utilized*/
+void external_heat_gpu( int step, int block_size_x, int block_size_y){
+	//use ceil to make sure i allocate enough threads
+	int num_block_x_direc = iDivup(GRID_SIZE[0],(2*block_size_x));
+	int num_block_y_direc = iDivup(GRID_SIZE[1],(8*block_size_y));
+	//this is not complete
+	gpuErrchk(cudaPeekAtLastError());
+	dim3 gridBlock(num_block_x_direc, num_block_y_direc);
+        dim3 threadBlock(block_size_x,block_size_y); //need to check dimensions to be consistent 
+        external_heat_kernel<<<gridBlock,threadBlock>>>(temperature_device[step%2], GRID_SIZE[0]/4, GRID_SIZE[1]/2-GRID_SIZE[1]/16, GRID_SIZE[0] );//curios on the notation
 	//need to do more not sure what do do next??? 
 }
-
+//test
 void print_gpu_info(){
   int n_devices;
   cudaGetDeviceCount(&n_devices);
@@ -189,7 +406,7 @@ int main ( int argc, char **argv ){
     // Allocate and initialize data on host
     host_allocation();
     init_temp_material();
-    
+   //test 
     // Allocate arrays on device, and transfer inputs
     device_allocation();
     transfer_to_gpu();
